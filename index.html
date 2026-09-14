@@ -438,9 +438,15 @@ footer{border-top:1px solid var(--line);padding:56px 0 40px;background:var(--bg2
 </footer>
 
 <script>
-/* ---- live metals ticker (api.gold-api.com, no key, CORS-enabled) ---- */
+/* ---- live metals ticker ----
+   Prices: api.gold-api.com (free, keyless). Upstream refreshes about every 30s,
+   so the page polls every 10s - fast enough to never miss a tick, without
+   hammering the source. The day's opening price comes from /api/open, which is
+   cached at the edge for 24h per UTC date, so every visitor measures the % change
+   against the same open. Falls back to a per-browser open if that call fails. */
 const METALS=[{s:'XAU',n:'GOLD'},{s:'XAG',n:'SILVER'},{s:'XPT',n:'PLATINUM'},
               {s:'XPD',n:'PALLADIUM'},{s:'HG',n:'COPPER',u:'/LB'}];
+const POLL_MS=10000;
 const tk=document.getElementById('tk'), upd=document.getElementById('upd');
 
 const cell=m=>`<span class="tk"><b>${m.n}</b>`+
@@ -449,20 +455,29 @@ const cell=m=>`<span class="tk"><b>${m.n}</b>`+
 tk.innerHTML=METALS.map(cell).join('')+METALS.map(cell).join('');
 
 const fmt=v=>v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
-const today=()=>new Date().toISOString().slice(0,10);
+const utcDay=()=>new Date().toISOString().slice(0,10);
 
-/* baseline = first price seen today (UTC), so the % is a real change-on-the-day */
-function baseline(sym,price){
-  const k='he_base_'+sym+'_'+today();
+/* --- the day's open, shared across all visitors --- */
+const OPEN_URL='https://raw.githubusercontent.com/hiddeneconomy/'+
+               'the-hidden-economy-site/main/open.json';
+let dayOpen=null;
+async function loadOpen(){
   try{
-    const v=localStorage.getItem(k);
-    if(v) return parseFloat(v);
-    localStorage.setItem(k,price);
-    Object.keys(localStorage).forEach(x=>{
-      if(x.startsWith('he_base_')&&!x.endsWith(today())) localStorage.removeItem(x);
-    });
+    const r=await fetch(OPEN_URL+'?d='+utcDay(),{cache:'no-store'});
+    if(!r.ok) return;
+    const j=await r.json();
+    dayOpen=(j&&j.day===utcDay()&&j.prices)?j.prices:null;
   }catch(e){}
-  return null;
+}
+
+/* --- fallback: this browser's own first price of the UTC day --- */
+function localOpen(sym,price){
+  const k='he_ref_'+sym, d=utcDay();
+  let r=null;
+  try{ r=JSON.parse(localStorage.getItem(k)||'null') }catch(e){}
+  if(!r||typeof r!=='object'||r.day!==d) r={day:d,open:price};
+  try{ localStorage.setItem(k,JSON.stringify(r)) }catch(e){}
+  return r.open;
 }
 
 const last={};
@@ -472,13 +487,14 @@ function paint(m,price){
     el.textContent='$'+fmt(pv)+(m.u||'');
     if(last[m.s]!=null&&pv!==last[m.s]){
       const cls=pv>last[m.s]?'flash-u':'flash-d';
-      el.classList.add(cls); setTimeout(()=>el.classList.remove(cls),1400);
+      el.classList.add(cls); setTimeout(()=>el.classList.remove(cls),1200);
     }
   });
   last[m.s]=pv;
-  const b=baseline(m.s,pv);
-  if(b){
-    const ch=((pv-b)/b)*100, up=ch>=0;
+
+  const open=(dayOpen&&dayOpen[m.s])||localOpen(m.s,pv);
+  if(open){
+    const ch=((pv-open)/open)*100, up=ch>=0;
     document.querySelectorAll(`[data-c="${m.s}"]`).forEach(el=>{
       el.className='c '+(up?'u':'d');
       el.textContent=(up?'▲':'▼')+Math.abs(ch).toFixed(2)+'%';
@@ -486,6 +502,7 @@ function paint(m,price){
   }
 }
 
+let lastOk=null;
 async function refresh(){
   const res=await Promise.allSettled(
     METALS.map(m=>fetch('https://api.gold-api.com/price/'+m.s,{cache:'no-store'}).then(r=>r.json()))
@@ -494,13 +511,20 @@ async function refresh(){
   res.forEach((r,i)=>{
     if(r.status==='fulfilled'&&r.value&&typeof r.value.price==='number'){ paint(METALS[i],r.value.price); ok++; }
   });
-  upd.textContent = ok
-    ? 'UPD '+new Date().toLocaleTimeString('en-GB',{hour12:false})
-    : 'FEED OFFLINE';
+  if(ok) lastOk=Date.now();
 }
-refresh();
-setInterval(refresh,60000);
-document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh()});
+
+/* clock ticks every second so the feed reads as live between polls */
+setInterval(()=>{
+  if(!lastOk){ upd.textContent='CONNECTING…'; return; }
+  const age=Math.round((Date.now()-lastOk)/1000);
+  upd.textContent = age>120 ? 'FEED STALLED' : 'UPD '+new Date(lastOk).toLocaleTimeString('en-GB',{hour12:false});
+},1000);
+
+(async()=>{ await loadOpen(); refresh(); })();
+setInterval(refresh,POLL_MS);
+setInterval(loadOpen,15*60*1000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){loadOpen();refresh()}});
 
 /* ---- videos ---- */
 const vids=[
