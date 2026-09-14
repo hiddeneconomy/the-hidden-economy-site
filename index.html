@@ -47,6 +47,12 @@ a{color:inherit;text-decoration:none}
 .tk b{color:var(--mute);font-weight:500;letter-spacing:.16em}
 .tk .p{color:var(--ink);font-weight:500}
 .tk .u{color:var(--up)}.tk .d{color:var(--down)}
+.tk .p{transition:color .45s}
+.tk .flash-u{color:var(--up)!important}.tk .flash-d{color:var(--down)!important}
+.ticker-upd{position:relative;z-index:3;flex:0 0 auto;display:flex;align-items:center;gap:7px;
+  height:100%;padding:0 14px;margin-left:auto;border-left:1px solid var(--line);background:#0b0d0f;
+  font-family:var(--mono);font-size:10px;letter-spacing:.14em;color:var(--dim);white-space:nowrap}
+@media(max-width:620px){.ticker-upd{display:none}}
 
 /* ---------- NAV ---------- */
 header{position:sticky;top:0;z-index:50;background:rgba(8,9,10,.82);
@@ -229,6 +235,7 @@ footer{border-top:1px solid var(--line);padding:56px 0 40px;background:var(--bg2
 <div class="ticker">
   <div class="ticker-live"><i class="dot"></i>LIVE</div>
   <div class="ticker-track" id="tk"></div>
+  <div class="ticker-upd" id="upd">SYNCING…</div>
 </div>
 
 <!-- NAV -->
@@ -431,12 +438,69 @@ footer{border-top:1px solid var(--line);padding:56px 0 40px;background:var(--bg2
 </footer>
 
 <script>
-/* ---- ticker ---- */
-const base=[["GOLD","$4,429.83",0.42],["SILVER","$66.37",-0.18],["PLATINUM","$1,284.50",1.06],
-["PALLADIUM","$1,102.08",0.55],["COPPER","$5.42/LB",0.31]];
-const tk=document.getElementById('tk');
-const row=()=>base.map(([n,p,c])=>`<span class="tk"><b>${n}</b><span class="p">${p}</span><span class="${c>=0?'u':'d'}">${c>=0?'▲':'▼'}${Math.abs(c).toFixed(2)}%</span></span>`).join('');
-tk.innerHTML=row()+row();
+/* ---- live metals ticker (api.gold-api.com, no key, CORS-enabled) ---- */
+const METALS=[{s:'XAU',n:'GOLD'},{s:'XAG',n:'SILVER'},{s:'XPT',n:'PLATINUM'},
+              {s:'XPD',n:'PALLADIUM'},{s:'HG',n:'COPPER',u:'/LB'}];
+const tk=document.getElementById('tk'), upd=document.getElementById('upd');
+
+const cell=m=>`<span class="tk"><b>${m.n}</b>`+
+  `<span class="p" data-p="${m.s}">— —</span>`+
+  `<span class="c" data-c="${m.s}"></span></span>`;
+tk.innerHTML=METALS.map(cell).join('')+METALS.map(cell).join('');
+
+const fmt=v=>v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const today=()=>new Date().toISOString().slice(0,10);
+
+/* baseline = first price seen today (UTC), so the % is a real change-on-the-day */
+function baseline(sym,price){
+  const k='he_base_'+sym+'_'+today();
+  try{
+    const v=localStorage.getItem(k);
+    if(v) return parseFloat(v);
+    localStorage.setItem(k,price);
+    Object.keys(localStorage).forEach(x=>{
+      if(x.startsWith('he_base_')&&!x.endsWith(today())) localStorage.removeItem(x);
+    });
+  }catch(e){}
+  return null;
+}
+
+const last={};
+function paint(m,price){
+  const pv=parseFloat(price);
+  document.querySelectorAll(`[data-p="${m.s}"]`).forEach(el=>{
+    el.textContent='$'+fmt(pv)+(m.u||'');
+    if(last[m.s]!=null&&pv!==last[m.s]){
+      const cls=pv>last[m.s]?'flash-u':'flash-d';
+      el.classList.add(cls); setTimeout(()=>el.classList.remove(cls),1400);
+    }
+  });
+  last[m.s]=pv;
+  const b=baseline(m.s,pv);
+  if(b){
+    const ch=((pv-b)/b)*100, up=ch>=0;
+    document.querySelectorAll(`[data-c="${m.s}"]`).forEach(el=>{
+      el.className='c '+(up?'u':'d');
+      el.textContent=(up?'▲':'▼')+Math.abs(ch).toFixed(2)+'%';
+    });
+  }
+}
+
+async function refresh(){
+  const res=await Promise.allSettled(
+    METALS.map(m=>fetch('https://api.gold-api.com/price/'+m.s,{cache:'no-store'}).then(r=>r.json()))
+  );
+  let ok=0;
+  res.forEach((r,i)=>{
+    if(r.status==='fulfilled'&&r.value&&typeof r.value.price==='number'){ paint(METALS[i],r.value.price); ok++; }
+  });
+  upd.textContent = ok
+    ? 'UPD '+new Date().toLocaleTimeString('en-GB',{hour12:false})
+    : 'FEED OFFLINE';
+}
+refresh();
+setInterval(refresh,60000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh()});
 
 /* ---- videos ---- */
 const vids=[
